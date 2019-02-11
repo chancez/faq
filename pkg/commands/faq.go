@@ -66,9 +66,10 @@ How do you pronounce "faq"? Fuck you.
 	rootCmd.Flags().StringVarP(&flags.OutputFormat, "output-format", "o", "auto", "output format")
 	rootCmd.Flags().StringVarP(&flags.ProgramFile, "program-file", "F", "", "If specified, read the file provided as the jq program for faq.")
 	rootCmd.Flags().BoolVarP(&flags.Raw, "raw-output", "r", false, "output raw strings, not JSON texts")
-	rootCmd.Flags().BoolVarP(&flags.Color, "color-output", "c", true, "colorize the output")
-	rootCmd.Flags().BoolVarP(&flags.Monochrome, "monochrome-output", "m", false, "monochrome (don't colorize the output)")
+	rootCmd.Flags().BoolVarP(&flags.Color, "color-output", "C", true, "colorize the output")
+	rootCmd.Flags().BoolVarP(&flags.Monochrome, "monochrome-output", "M", false, "monochrome (don't colorize the output)")
 	rootCmd.Flags().BoolVarP(&flags.Pretty, "pretty-output", "p", true, "pretty-printed output")
+	rootCmd.Flags().BoolVarP(&flags.Compact, "compact-output", "c", false, "compact output (don't pretty print the output)")
 	rootCmd.Flags().BoolVarP(&flags.Slurp, "slurp", "s", false, "read (slurp) all inputs into an array; apply filter to it")
 	rootCmd.Flags().BoolVarP(&flags.ProvideNull, "null-input", "n", false, "use `null` as the single input value")
 	rootCmd.Flags().Var(stringPositionalArgsFlag, "args", `Takes a value and adds it to the position arguments list. Values are always strings. Positional arguments are available as $ARGS.positional[]. Specify --args multiple times to pass additional arguments.`)
@@ -90,11 +91,20 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 		fmt.Println(version.Version)
 		return nil
 	}
-	isTTY := terminal.IsTerminal(int(os.Stdin.Fd()))
 
-	// If stdout isn't an interactive tty, or we're on windows then default to monochrome.
-	if !isTTY || runtime.GOOS == "windows" {
-		flags.Monochrome = true
+	outputFile := os.Stdout
+	var color bool
+	// If monochrome is true, disable color, as it takes higher precedence then
+	// --color-output.
+	// If we're running in Windows, disable color, since it usually doesn't
+	// handle colors correctly.
+	// If the output isn't a TTY, and color hasn't been explicitly set via the
+	// flag, disable color.
+	// otherwise, use to the flags values to determine if color is enabled.
+	if flags.Monochrome || runtime.GOOS == "windows" || !terminal.IsTerminal(int(outputFile.Fd())) && !cmd.Flags().Changed("color-output") {
+		color = false
+	} else {
+		color = flags.Color && !flags.Monochrome
 	}
 
 	// Check to see execution is in an interactive terminal and set the args
@@ -120,8 +130,15 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 
 	if flags.ProvideNull {
 		paths = nil
+		if flags.InputFormat == "auto" {
+			flags.InputFormat = "json"
+		}
+		// Set output format to json if not explicitly set.
+		if !cmd.Flags().Changed("output-format") {
+			flags.OutputFormat = "json"
+		}
 	} else {
-		if !isTTY && len(args) == 0 {
+		if !terminal.IsTerminal(int(os.Stdin.Fd())) && len(args) == 0 {
 			paths = []string{"/dev/stdin"}
 		} else if len(args) != 0 {
 			paths = args
@@ -139,7 +156,6 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 		}
 	}
 
-	outputWriter := os.Stdout
 	programArgs := faq.ProgramArguments{
 		Args:       flags.Args,
 		Jsonargs:   flags.Jsonargs,
@@ -147,17 +163,16 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 		Jsonkwargs: flags.Jsonkwargs,
 	}
 	outputConf := faq.OutputConfig{
-		Raw:    flags.Raw,
-		Pretty: flags.Pretty,
-		Color:  flags.Color && !flags.Monochrome,
+		Pretty: !flags.Compact && flags.Pretty,
+		Color:  color,
 	}
 
 	if flags.ProvideNull {
-		encoder, ok := formats.ByName(flags.OutputFormat)
+		encoding, ok := formats.ByName(flags.OutputFormat)
 		if !ok {
 			return fmt.Errorf("invalid --output-format %s", flags.OutputFormat)
 		}
-		err := faq.ExecuteProgram(nil, program, programArgs, outputWriter, encoder, outputConf)
+		err := faq.ProcessInput(nil, program, programArgs, outputFile, encoding, outputConf, flags.Raw)
 		if err != nil {
 			return err
 		}
@@ -168,16 +183,23 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 		if flags.OutputFormat == "" {
 			return fmt.Errorf("must specify --output-format when using --slurp")
 		}
-		encoder, ok := formats.ByName(flags.OutputFormat)
+		encoding, ok := formats.ByName(flags.OutputFormat)
 		if !ok {
 			return fmt.Errorf("invalid --output-format %s", flags.OutputFormat)
 		}
-		err := faq.SlurpAllFiles(flags.InputFormat, files, program, programArgs, outputWriter, encoder, outputConf)
+		err := faq.SlurpAllFiles(flags.InputFormat, files, program, programArgs, outputFile, encoding, outputConf, flags.Raw)
 		if err != nil {
 			return err
 		}
 	} else {
-		err := faq.ProcessEachFile(flags.InputFormat, files, program, programArgs, outputWriter, flags.OutputFormat, outputConf)
+		if flags.OutputFormat == "" {
+			return fmt.Errorf("must specify --output-format when using --slurp")
+		}
+		encoding, ok := formats.ByName(flags.OutputFormat)
+		if !ok {
+			return fmt.Errorf("invalid --output-format %s", flags.OutputFormat)
+		}
+		err := faq.ProcessEachFile(flags.InputFormat, files, program, programArgs, outputFile, encoding, outputConf, flags.Raw)
 		if err != nil {
 			return err
 		}
@@ -196,6 +218,7 @@ type flags struct {
 	Color        bool
 	Monochrome   bool
 	Pretty       bool
+	Compact      bool
 	Slurp        bool
 	ProvideNull  bool
 	Args         []string

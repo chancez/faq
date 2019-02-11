@@ -16,6 +16,7 @@ void set_jq_error_cb_default(jq_state *jq);
 import "C"
 import (
 	"errors"
+	"fmt"
 	"math/rand"
 	"reflect"
 	"unsafe"
@@ -186,7 +187,7 @@ func goJQErrorHandler(id uint64, jv C.jv) {
 // The args and input parameters are expected to be JSON bytes.
 // If the args parameter is not null, an array, or an object, then ErrWrongType
 // is returned.
-func Exec(program string, args, input []byte) ([]string, error) {
+func Exec(program string, args, input []byte, raw bool) ([]string, error) {
 	state, err := C.jq_init()
 	if err != nil {
 		return nil, err
@@ -195,24 +196,28 @@ func Exec(program string, args, input []byte) ([]string, error) {
 	}
 	defer C.jq_teardown(&state)
 
-	argsJv := C.jv_parse((*C.char)(unsafe.Pointer(&args[0])))
+	argsPtr := C.CString(string(args))
+	defer C.free(unsafe.Pointer(argsPtr))
+	argsJv := C.jv_parse(argsPtr)
 	if C.jv_is_valid(argsJv) == 0 {
 		return nil, errorFromJv(argsJv)
 	}
 	defer C.jv_free(argsJv)
 
-	inputJv := C.jv_parse((*C.char)(unsafe.Pointer(&input[0])))
+	inputPtr := C.CString(string(input))
+	defer C.free(unsafe.Pointer(inputPtr))
+	inputJv := C.jv_parse(inputPtr)
 	if C.jv_is_valid(inputJv) == 0 {
 		return nil, errorFromJv(inputJv)
 	}
 	defer C.jv_free(inputJv)
 
-	return executeProgram(state, program, argsJv, inputJv)
+	return executeProgram(state, program, argsJv, inputJv, raw)
 }
 
 // executeProgram compiles and executes a jq program with the provided
 // arguments and input.
-func executeProgram(state *C.struct_jq_state, program string, args, input C.jv) ([]string, error) {
+func executeProgram(state *C.struct_jq_state, program string, args, input C.jv, raw bool) ([]string, error) {
 	errs := compile(state, program, args)
 	if len(errs) != 0 {
 		err := errs[0]
@@ -222,19 +227,25 @@ func executeProgram(state *C.struct_jq_state, program string, args, input C.jv) 
 		return nil, err
 	}
 
-	return execute(state, input)
+	return execute(state, input, raw)
 }
 
 // execute performs an execution of the previous compiled program.
 // compile() must be called before this function.
-func execute(state *C.struct_jq_state, input C.jv) ([]string, error) {
+func execute(state *C.struct_jq_state, input C.jv, raw bool) ([]string, error) {
 	// I can't figure out where, but it seems like jq_start frees input.
 	C.jq_start(state, C.jv_copy(input), C.int(0))
 
 	results := make([]string, 0)
 	result := C.jq_next(state)
 	for C.jv_is_valid(result) == 1 {
-		results = append(results, dumpJvToGoStr(result))
+		var str string
+		if raw && C.jv_get_kind(result) == C.JV_KIND_STRING {
+			str = C.GoString(C.jv_string_value(result))
+		} else {
+			str = dumpJvToGoStr(result)
+		}
+		results = append(results, str)
 		C.jv_free(result)
 		result = C.jq_next(state)
 	}
@@ -275,7 +286,13 @@ func collectErrors(state *C.struct_jq_state, fn func()) []error {
 
 // ErrWrongType is returned from functions when an assertion about the type of
 // a value fails.
-var ErrWrongType = errors.New("the provided value was not the required type")
+type ErrWrongType struct {
+	message string
+}
+
+func (e *ErrWrongType) Error() string {
+	return e.message
+}
 
 // compile prepares a jq program for execution.
 // The provided args must be KindArray or KindObject.
@@ -283,7 +300,7 @@ func compile(state *C.struct_jq_state, program string, args C.jv) []error {
 	// This check is done in libjq, but it's faster to check here and bail early.
 	kind := C.jv_get_kind(args)
 	if !(kind == C.JV_KIND_ARRAY || kind == C.JV_KIND_OBJECT) {
-		return []error{ErrWrongType}
+		return []error{&ErrWrongType{fmt.Sprintf("args was not the required type, got %s, expected: %s or %s", jvKindName(kind), jvKindName(C.JV_KIND_OBJECT), jvKindName(C.JV_KIND_ARRAY))}}
 	}
 
 	return collectErrors(state, func() {
@@ -293,4 +310,8 @@ func compile(state *C.struct_jq_state, program string, args C.jv) []error {
 		// jq_compile_args frees the args JV, so we provide a copy for sanity.
 		C.jq_compile_args(state, cprog, C.jv_copy(args))
 	})
+}
+
+func jvKindName(kind C.jv_kind) string {
+	return C.GoString(C.jv_kind_name(kind))
 }
