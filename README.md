@@ -31,18 +31,42 @@ faq is still under heavy development and has only unstable binary releases.
 Behavior such as command-line flags may change causing shell scripts using faq to break after upgrading.
 jq programs are stable and should be considered a bug if it does not match jq behavior.
 
-### Linux
-
-```sh
-curl -Lo /usr/local/bin/faq https://github.com/jzelinskie/faq/releases/download/0.0.5/faq-linux-amd64
-chmod +x /usr/local/bin/faq
-```
-
 ### macOS
 
 ```sh
 brew tap jzelinskie/faq
 brew install faq
+```
+
+### Linux
+
+#### Static binary
+
+```sh
+LATEST_RELEASE=$(curl -s https://api.github.com/repos/jzelinskie/faq/releases | cat | head -n 10 | grep "tag_name" | cut -d\" -f4)
+curl -Lo /usr/local/bin/faq https://github.com/jzelinskie/faq/releases/download/$LATEST_RELEASE/faq-linux-amd64
+chmod +x /usr/local/bin/faq
+```
+
+#### RPMs
+
+RPMs are available via a [COPR repository]. 
+The source for RPM builds can be found [here](https://github.com/chancez/faq-rpm).
+
+[COPR repository]: https://copr.fedorainfracloud.org/coprs/ecnahc515/faq
+
+##### Fedora
+
+```
+dnf copr enable ecnahc515/faq
+dnf install faq
+```
+
+##### CentOS
+
+```
+curl https://copr.fedorainfracloud.org/coprs/ecnahc515/faq/repo/epel-7/ecnahc515-faq-epel-7.repo -o /etc/yum.repos.d/ecnahc515-faq-epel-7.repo
+yum install faq
 ```
 
 ## Development

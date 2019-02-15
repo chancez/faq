@@ -16,16 +16,6 @@ import (
 	"github.com/jzelinskie/faq/pkg/version"
 )
 
-// ExecuteFaqCmd executes the faq commandline program
-func ExecuteFaqCmd() {
-	faqCmd := NewFaqCommand()
-	err := faqCmd.Execute()
-	if err != nil {
-		fmt.Printf("error executing %s: %v\n", faqCmd.Name(), err)
-		return
-	}
-}
-
 // NewFaqCommand returns a cobra.Command that
 func NewFaqCommand() *cobra.Command {
 	var flags flags
@@ -109,10 +99,7 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 
 	// Check to see execution is in an interactive terminal and set the args
 	// and flags as such.
-	var (
-		program string
-		paths   []string
-	)
+	var program string
 
 	var files []faq.File
 	if flags.ProgramFile != "" {
@@ -129,7 +116,6 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 	}
 
 	if flags.ProvideNull {
-		paths = nil
 		if flags.InputFormat == "auto" {
 			flags.InputFormat = "json"
 		}
@@ -138,22 +124,20 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 			flags.OutputFormat = "json"
 		}
 	} else {
-		if !terminal.IsTerminal(int(os.Stdin.Fd())) && len(args) == 0 {
-			paths = []string{"/dev/stdin"}
+		if len(args) == 0 {
+			files = []faq.File{faq.NewFile("/dev/stdin", os.Stdin)}
 		} else if len(args) != 0 {
-			paths = args
-		} else {
-			return fmt.Errorf("not enough arguments provided")
+			// Verify all files exist, and open them.
+			for _, path := range args {
+				file, err := faq.OpenFile(path)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				files = append(files, file)
+			}
 		}
 
-		// Verify all files exist, and open them.
-		for _, path := range paths {
-			fileInfo, err := faq.OpenFile(path)
-			if err != nil {
-				return err
-			}
-			files = append(files, fileInfo)
-		}
 	}
 
 	programArgs := faq.ProgramArguments{
@@ -168,6 +152,11 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 	}
 
 	if flags.ProvideNull {
+		// If --output-format is auto, and we're taking a null input, we just
+		// default to JSON output
+		if flags.OutputFormat == "auto" {
+			flags.OutputFormat = "json"
+		}
 		encoding, ok := formats.ByName(flags.OutputFormat)
 		if !ok {
 			return fmt.Errorf("invalid --output-format %s", flags.OutputFormat)
@@ -192,14 +181,18 @@ func runCmdFunc(cmd *cobra.Command, args []string, flags flags) error {
 			return err
 		}
 	} else {
-		if flags.OutputFormat == "" {
-			return fmt.Errorf("must specify --output-format when using --slurp")
+		// If --output-format is auto, then use --input-format as the default
+		// output-format, otherwise try to detect the format of the input file
+		// and use that as the output format.
+		if flags.OutputFormat == "auto" && flags.InputFormat != "auto" {
+			flags.OutputFormat = flags.InputFormat
 		}
-		encoding, ok := formats.ByName(flags.OutputFormat)
-		if !ok {
-			return fmt.Errorf("invalid --output-format %s", flags.OutputFormat)
+		encoding, newFile, err := faq.DetermineEncoding(flags.OutputFormat, files[0])
+		if err != nil {
+			return fmt.Errorf("invalid --output-format %s: %v", flags.OutputFormat, err)
 		}
-		err := faq.ProcessEachFile(flags.InputFormat, files, program, programArgs, outputFile, encoding, outputConf, flags.Raw)
+		files[0] = newFile
+		err = faq.ProcessEachFile(flags.InputFormat, files, program, programArgs, outputFile, encoding, outputConf, flags.Raw)
 		if err != nil {
 			return err
 		}
